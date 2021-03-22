@@ -203,19 +203,19 @@ public class CustomSpecifications<T> {
      * @param root
      * @param join
      * @param query
-     * @param a
+     * @param attribute
      * @param key
      * @param values
      * @param conjunction
      * @return
      */
-    private Predicate handleCollection(CriteriaBuilder builder, Root root, Join join, CriteriaQuery query, Attribute a,
-            String key, Collection values, boolean conjunction) {
+    private Predicate handleCollection(CriteriaBuilder builder, Root root, Join join, CriteriaQuery query,
+            Attribute attribute, String key, Collection values, boolean conjunction) {
         List<Predicate> predicates = new ArrayList<>();
 
         // iterate all values
         for (Object val : values) {
-            Predicate predicate = handleAllCases(builder, root, join, query, a, key, val);
+            Predicate predicate = handleAllCases(builder, root, join, query, attribute, key, val);
             predicates.add(predicate);
         }
 
