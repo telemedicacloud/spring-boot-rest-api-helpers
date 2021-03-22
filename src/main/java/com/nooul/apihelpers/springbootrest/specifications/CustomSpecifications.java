@@ -7,14 +7,13 @@
 
 package com.nooul.apihelpers.springbootrest.specifications;
 
+import org.hibernate.query.criteria.internal.path.PluralAttributePath;
 import org.springframework.stereotype.Service;
 
 import javax.persistence.EntityManager;
 import javax.persistence.PersistenceContext;
 import javax.persistence.criteria.*;
-import javax.persistence.metamodel.Attribute;
-import javax.persistence.metamodel.IdentifiableType;
-import javax.persistence.metamodel.Metamodel;
+import javax.persistence.metamodel.*;
 
 import com.nooul.apihelpers.springbootrest.utils.MapUtils;
 import com.nooul.apihelpers.springbootrest.utils.StringUtils;
@@ -26,483 +25,318 @@ import java.text.SimpleDateFormat;
 import java.util.*;
 
 @Service
-@SuppressWarnings({ "rawtypes", "unchecked" })
+@SuppressWarnings("rawtypes")
 public class CustomSpecifications<T> {
 
     @PersistenceContext
-    private EntityManager entityManager;
+    private EntityManager em;
 
-    /**
-     * Build predicates for filter
-     * 
-     * @param builder
-     * @param query
-     * @param root
-     * @param filterMap
-     * @param searchOnlyInFields
-     * @param useSnakeCase
-     * @return
-     */
-    public Predicate customSpecificationBuilder(CriteriaBuilder builder, CriteriaQuery query, Root root,
+    public Predicate customSpecificationBuilder(CriteriaBuilder cb, CriteriaQuery query, Path path,
             Map<String, Object> filterMap, List<String> searchOnlyInFields, boolean useSnakeCase) {
-        // set distinct
         query.distinct(true);
 
-        // check snake case
         if (useSnakeCase) {
             filterMap = MapUtils.toCamelCase((HashMap<String, Object>) filterMap);
         }
 
-        // build predicate
-        List<Predicate> andPredicates = handleMap(builder, root, null, query, filterMap, searchOnlyInFields);
+        List<Predicate> andPredicates = handleMap(cb, query, path, filterMap, searchOnlyInFields);
 
-        // chain and predicate
-        return builder.and(andPredicates.toArray(new Predicate[andPredicates.size()]));
+        return cb.and(andPredicates.toArray(new Predicate[andPredicates.size()]));
     }
 
-    /**
-     * Build predicates for or filter
-     * 
-     * @param cb
-     * @param query
-     * @param root
-     * @param filterMap
-     * @param searchOnlyInFields
-     * @param useSnakeCase
-     * @return
-     */
-    public Predicate customSpecificationBuilder(CriteriaBuilder cb, CriteriaQuery query, Root root,
+    public Predicate customSpecificationBuilder(CriteriaBuilder cb, CriteriaQuery query, Path path,
             List<Map<String, Object>> filterMap, List<String> searchOnlyInFields, boolean useSnakeCase) {
-        // set distinct
         query.distinct(true);
 
-        // iterate all elements
         List<Predicate> restrictions = new ArrayList<Predicate>();
         for (Map<String, Object> element : filterMap) {
             Map<String, Object> elementsel = element;
-            // check snake case
             if (useSnakeCase) {
                 elementsel = MapUtils.toCamelCase((HashMap<String, Object>) elementsel);
             }
-            // build predicate
-            List<Predicate> andPredicates = handleMap(cb, root, null, query, elementsel, searchOnlyInFields);
-            // chain and predicate
+            List<Predicate> andPredicates = handleMap(cb, query, path, element, searchOnlyInFields);
             restrictions.add(cb.and(andPredicates.toArray(new Predicate[andPredicates.size()])));
         }
 
-        // chain or predicate
         return cb.or(restrictions.toArray(new Predicate[restrictions.size()]));
     }
 
-    /**
-     * Handle a map
-     * 
-     * @param builder
-     * @param root
-     * @param join
-     * @param query
-     * @param map
-     * @param includeOnlyFields
-     * @return
-     */
-    private List<Predicate> handleMap(CriteriaBuilder builder, Root root, Join join, CriteriaQuery query,
-            Map<String, Object> map, List<String> includeOnlyFields) {
+    private List<Predicate> handleMap(CriteriaBuilder cb, CriteriaQuery query, Path path, Map<String, Object> filterMap,
+            List<String> searchOnlyInFields) {
+        if (path instanceof Root) {
+            getRoot(path, query);
+        }
+        List<Predicate> andPredicates = new ArrayList<>();
+        if (filterMap.containsKey("q") && filterMap.get("q") instanceof String) {
 
-        // check root by join
-        if (join != null) {
-            root = query.from(getJavaTypeOfClassContainingAttribute(root, join.getAttribute().getName()));
+            andPredicates.add(
+                    searchInAllAttributesPredicate(cb, query, path, (String) filterMap.get("q"), searchOnlyInFields));
+            filterMap.remove("q");
         }
 
+        andPredicates.addAll(handlePrimitiveEquality(cb, query, path, filterMap));
+        andPredicates.addAll(handleAssociationEquality(cb, query, path, filterMap));
+        andPredicates.addAll(handlePrimitiveComparison(cb, path, filterMap, "Not"));
+        andPredicates.addAll(handlePrimitiveComparison(cb, path, filterMap, "Gte"));
+        andPredicates.addAll(handlePrimitiveComparison(cb, path, filterMap, "Lte"));
+        andPredicates.addAll(handlePrimitiveComparison(cb, path, filterMap, "Lt"));
+        andPredicates.addAll(handlePrimitiveComparison(cb, path, filterMap, "Gt"));
+        return andPredicates;
+    }
+
+    private Root getRoot(Path path, CriteriaQuery query) {
+        if (path instanceof Root) {
+            return (Root) path;
+            // return rootsMap.put(path.getJavaType(), (Root)path);
+        } else if (path instanceof PluralAttributePath) {
+            Class key = ((PluralAttributePath) path).getAttribute().getElementType().getJavaType();
+            return query.from(key);
+        } else if (path instanceof Join) {
+            Class key = path.getModel().getBindableJavaType();
+            // if (rootsMap.containsKey(key)) {
+            // return rootsMap.get(key);
+            // }
+            // else {
+            // rootsMap.put(key, query.from(key));
+            // return rootsMap.get(key);
+            // }
+            return query.from(key);
+        } else {
+            Class key = path.getJavaType();
+            // if (rootsMap.containsKey(key)) {
+            // return rootsMap.get(key);
+            // }
+            // else {
+            // Root root = rootsMap.put(key, query.from(key));
+            // return root;
+            // }
+            return query.from(key);
+        }
+    }
+
+    private List<Predicate> handleAssociationEquality(CriteriaBuilder cb, CriteriaQuery query, Path path,
+            Map<String, Object> filterMap) {
+        Root root = getRoot(path, query);
+        Map<String, Attribute> attributeMap = convertStringMapToAttrMap(path, query, filterMap);
+        Map<String, Attribute> associationAttributesMap = filterAssociationAttributes(attributeMap);
         List<Predicate> predicates = new ArrayList<>();
-        Predicate predicate;
 
-        // check "q"
-        if (map.containsKey("q") && map.get("q") instanceof String) {
-            predicates
-                    .add(createSearchInAllAttributesPredicate(builder, root, (String) map.get("q"), includeOnlyFields));
-            map.remove("q");
+        for (Map.Entry<String, Attribute> entry : associationAttributesMap.entrySet()) {
+            String attributeName = entry.getKey();
+            Object value = filterMap.get(entry.getKey());
+            if (value == null) {
+                Predicate predicate = cb.and(cb.isNull(root.join(attributeName, JoinType.LEFT)));
+                predicates.add(predicate);
+            } else {
+                Join join = addJoinIfNotExists(path, query, attributeName);
+                String primaryKeyName = getPrimaryKey(join);
+                if (isPrimitiveValue(value)) {
+
+                    Predicate predicate = cb.and(cb.equal(join.get(getPrimaryKey(join)), value));
+                    predicates.add(predicate);
+                } else if (isCollectionOfPrimitives(value)) {
+                    Collection vals = (Collection) value;
+                    List<Predicate> orPredicates = new ArrayList<>();
+                    for (Object val : vals) {
+                        Predicate predicate = cb.equal(join.get(getPrimaryKey(join)), val);
+                        orPredicates.add(predicate);
+                    }
+                    predicates.add(cb.or(orPredicates.toArray(new Predicate[orPredicates.size()])));
+
+                } else if (isMap(value)) {
+
+                    if (((Map) value).containsKey(primaryKeyName)) {
+                        Predicate predicate = cb
+                                .and(cb.equal(join.get(primaryKeyName), (((Map) value).get(primaryKeyName))));
+                        predicates.add(predicate);
+                    } else {
+                        // Path expanded = path.get(attributeName);
+                        predicates
+                                .addAll(handleMap(cb, query, path.get(attributeName), (Map) value, new ArrayList<>()));
+                        // do something for non ids in actors: { name: }
+                    }
+                } else if (isCollectionOfMaps(value)) {
+                    Collection<Map> vals = (Collection<Map>) value;
+                    List<Predicate> orPredicates = new ArrayList<>();
+                    for (Map val : vals) {
+                        if (val.containsKey(primaryKeyName)) {
+                            Predicate predicate = cb.equal(root.join(attributeName).get(getPrimaryKey(join)),
+                                    (val.get(primaryKeyName)));
+                            orPredicates.add(predicate);
+                        }
+                    }
+                    predicates.add(cb.or(orPredicates.toArray(new Predicate[orPredicates.size()])));
+                }
+            }
+        }
+        return predicates;
+    }
+
+    private Predicate searchInAllAttributesPredicate(CriteriaBuilder builder, CriteriaQuery query, Path path,
+            String text, List<String> includeOnlyFields) {
+
+        if (!text.contains("%")) {
+            text = "%" + text + "%";
+        }
+        final String finalText = text;
+        Root root = getRoot(path, query);
+        Set<Attribute> attributes = root.getModel().getAttributes();
+        List<Predicate> orPredicates = new ArrayList<>();
+        for (Attribute a : attributes) {
+            boolean javaTypeIsString = a.getJavaType().getSimpleName().equalsIgnoreCase("string");
+            boolean shouldSearch = includeOnlyFields.isEmpty() || includeOnlyFields.contains(a.getName());
+            if (javaTypeIsString && shouldSearch) {
+                Predicate orPred = builder.like(root.get(a.getName()), finalText);
+                orPredicates.add(orPred);
+            }
+
         }
 
-        // perform predicate on all keys
-        Set<Attribute<? super T, ?>> attributes = root.getModel().getAttributes();
-        for (Map.Entry entry : map.entrySet()) {
-            String key = (String) entry.getKey();
-            Object val = entry.getValue();
-            String keyClean = cleanUpKey(key);
+        return builder.or(orPredicates.toArray(new Predicate[orPredicates.size()]));
 
-            Attribute attribute = root.getModel().getAttribute(keyClean);
-            if (attributes.contains(attribute)) {
-                predicate = handleAllCases(builder, root, join, query, attribute, key, val);
-                predicates.add(predicate);
+    }
+
+    private Join addJoinIfNotExists(Path path, CriteriaQuery query, String attributeName) {
+        Root root = getRoot(path, query);
+        Set<Join> joins = root.getJoins();
+        Join toReturn = null;
+        for (Join join : joins) {
+            if (attributeName.equals(join.getAttribute().getName())) {
+                toReturn = join;
+                break;
+            }
+        }
+        if (toReturn == null) {
+            toReturn = root.join(attributeName);
+        }
+        return toReturn;
+    }
+
+    private List<Predicate> handlePrimitiveEquality(CriteriaBuilder cb, CriteriaQuery query, Path path,
+            Map<String, Object> filterMap) {
+        List<Predicate> predicates = new ArrayList<>();
+        Map<String, Object> primitiveMap = filterPrimitiveValues(filterMap);
+        Root root = getRoot(path, query);
+        Map<String, Attribute> attributeMap = convertStringMapToAttrMap(path, query, filterMap);
+        Map<String, Attribute> singularAttrMap = filterSingularAttrs(attributeMap);
+        Map<String, Attribute> collectionAttrMap = filterCollectionAttrs(attributeMap);
+        Map<String, Object> attributesWithCollectionValuesMap = filterAttributesWithCollectionValues(filterMap);
+        for (Map.Entry<String, Object> entry : primitiveMap.entrySet()) {
+            String attributeName = entry.getKey();
+            Attribute attribute = attributeMap.get(attributeName);
+            Object value = entry.getValue();
+            if (singularAttrMap.containsKey(attributeName)) {
+
+                boolean isValTextSearch = (value instanceof String) && ((String) value).contains("%");
+                if (isNullValue(root, query, attributeName, value)) {
+                    Predicate predicate = cb.and(cb.isNull(path.get(attributeName)));
+                    predicates.add(predicate);
+                } else if (isValTextSearch) {
+                    Predicate predicate = cb.and(cb.like(path.get(attributeName), (String) value));
+                    predicates.add(predicate);
+                } else if (isEnum(attribute) && value instanceof String) {
+                    Predicate predicate = cb.equal(path.get(attributeName),
+                            Enum.valueOf(Class.class.cast(attribute.getJavaType()), (String) value));
+                    predicates.add(predicate);
+                } else {
+                    Predicate predicate = cb.and(cb.equal(path.get(attributeName), value));
+                    predicates.add(predicate);
+                }
+            } else if (collectionAttrMap.containsKey(attributeName)) {
+                // primitive collectionTable only ??
+                if (isNullValue(root, query, attributeName, value)) {
+                    Predicate predicate = cb.and(cb.isNull(root.join(attributeName, JoinType.LEFT)));
+                    predicates.add(predicate);
+                } else {
+                    Predicate predicate = cb.and(root.join(attributeName).in(Arrays.asList(value)));
+                    predicates.add(predicate);
+                }
+            }
+        }
+        for (Map.Entry<String, Object> entry : attributesWithCollectionValuesMap.entrySet()) {
+            Object value = entry.getValue();
+            if (!convertStringToAttribute(root, entry.getKey()).isAssociation()) {
+                Collection vals = (Collection) value;
+                List<Predicate> orPredicates = new ArrayList<>();
+                for (Object val : vals) {
+                    Predicate predicate = cb.equal(path.get(entry.getKey()), val);
+                    orPredicates.add(predicate);
+                }
+                predicates.add(cb.or(orPredicates.toArray(new Predicate[orPredicates.size()])));
             }
         }
 
         return predicates;
     }
 
-    /**
-     * Handle all the cases
-     * 
-     * @param builder
-     * @param root
-     * @param join
-     * @param query
-     * @param attribute
-     * @param key
-     * @param val
-     * @return
-     */
-    private Predicate handleAllCases(CriteriaBuilder builder, Root root, Join join, CriteriaQuery query,
-            Attribute attribute, String key, Object val) {
-        // check value types
-        boolean valIsCollection = val instanceof Collection;
-        String cleanKey = cleanUpKey(key);
-        boolean isKeyClean = cleanKey.equals(key);
-        boolean isNegation = key.endsWith("Not");
-        boolean isGt = key.endsWith("Gt");
-        boolean isGte = key.endsWith("Gte");
-        boolean isLt = key.endsWith("Lt");
-        boolean isLte = key.endsWith("Lte");
-        boolean isConjunction = key.endsWith("And");
-        boolean isAssociation = attribute.isAssociation();
-
-        // rebuild value if is a map
-        if (val instanceof Map) {
-            val = convertMapContainingPrimaryIdToValue(val, attribute, root);
-        }
-
-        // check by type of key
-        if (isAssociation && val instanceof Map) {
-            List<Predicate> predicates = handleMap(builder, root,
-                    addJoinIfNotExists(root, attribute, valIsCollection, isConjunction), query, ((Map) val),
-                    Arrays.asList());
-            return builder.and(predicates.toArray(new Predicate[predicates.size()]));
-        } else if (isKeyClean) {
-            return handleKeyClean(builder, root, join, query, cleanKey, attribute, val);
-        } else if (isNegation) {
-            return builder.not(handleKeyClean(builder, root, join, query, cleanKey, attribute, val));
-        } else if (isConjunction && valIsCollection) {
-            return handleCollection(builder, root, join, query, attribute, cleanKey, (Collection) val, true);
-        } else if (isLte) {
-            return createLtePredicate(builder, root, attribute, val);
-        } else if (isGte) {
-            return createGtePredicate(builder, root, attribute, val);
-        } else if (isLt) {
-            return createLtPredicate(builder, root, attribute, val);
-        } else if (isGt) {
-            return createGtPredicate(builder, root, attribute, val);
-        }
-
-        return builder.conjunction();
-    }
-
-    /**
-     * Handle Collection
-     * 
-     * @param builder
-     * @param root
-     * @param join
-     * @param query
-     * @param attribute
-     * @param key
-     * @param values
-     * @param conjunction
-     * @return
-     */
-    private Predicate handleCollection(CriteriaBuilder builder, Root root, Join join, CriteriaQuery query,
-            Attribute attribute, String key, Collection values, boolean conjunction) {
+    private List<Predicate> handlePrimitiveComparison(CriteriaBuilder cb, Path path, Map<String, Object> filterMap,
+            String comparisonPostFix) {
         List<Predicate> predicates = new ArrayList<>();
-
-        // iterate all values
-        for (Object val : values) {
-            Predicate predicate = handleAllCases(builder, root, join, query, attribute, key, val);
-            predicates.add(predicate);
-        }
-
-        if (conjunction)
-            return builder.and(predicates.toArray(new Predicate[predicates.size()]));
-        else
-            return builder.or(predicates.toArray(new Predicate[predicates.size()]));
-    }
-
-    /**
-     * Handle key clean
-     * 
-     * @param builder
-     * @param root
-     * @param join
-     * @param query
-     * @param key
-     * @param attribute
-     * @param val
-     * @return
-     */
-    private Predicate handleKeyClean(CriteriaBuilder builder, Root root, Join join, CriteriaQuery query, String key,
-            Attribute attribute, Object val) {
-
-        // check value type
-        boolean isValueCollection = val instanceof Collection;
-        boolean isValTextSearch = (val instanceof String) && ((String) val).contains("%");
-
-        // check by type of key
-        if (isValueCollection) {
-            return handleCollection(builder, root, join, query, attribute, key, (Collection) val, false);
-        } else if (isValTextSearch) {
-            return createLikePredicate(builder, root, join, attribute, (String) val);
-        } else if (attribute.isCollection() && !attribute.isAssociation()) {
-            return createEqualityPredicate(builder, root, addJoinIfNotExists(root, attribute, false, isValueCollection),
-                    attribute, val);
-        } else {
-            return createEqualityPredicate(builder, root, join, attribute, val);
-        }
-    }
-
-    /**
-     * Create equality predicate
-     * 
-     * @param builder
-     * @param root
-     * @param join
-     * @param attribute
-     * @param val
-     * @return
-     */
-    private Predicate createEqualityPredicate(CriteriaBuilder builder, Root root, Join join, Attribute attribute,
-            Object val) {
-        // check by type of key
-        if (isAttributeNull(attribute, val)) {
-            if (attribute.isAssociation() && attribute.isCollection()) {
-                return builder.isEmpty(root.get(attribute.getName()));
-            } else if (isPrimitive(attribute)) {
-                return builder.isNull(root.get(attribute.getName()));
-            } else {
-                return root.get(attribute.getName()).isNull();
-            }
-        } else if (join == null) {
-            if (isAttributeEnum(attribute)) {
-                return builder.equal(root.get(attribute.getName()),
-                        Enum.valueOf(Class.class.cast(attribute.getJavaType()), (String) val));
-            } else if (isPrimitive(attribute)) {
-                return builder.equal(root.get(attribute.getName()), val);
-            } else if (isAttributeUUID(attribute)) {
-                return builder.equal(root.get(attribute.getName()), UUID.fromString(val.toString()));
-            } else if (attribute.isAssociation()) {
-                if (isPrimaryKeyUUID(attribute, root)) {
-                    return prepareJoinAssociatedPredicate(builder, root, attribute, UUID.fromString(val.toString()));
-                } else {
-                    return prepareJoinAssociatedPredicate(builder, root, attribute, val);
+        Map<String, Object> primitiveMap = filterPrimitiveValues(filterMap);
+        for (Map.Entry<String, Object> entry : primitiveMap.entrySet()) {
+            String attributeName = entry.getKey();
+            if (attributeName.endsWith(comparisonPostFix)) {
+                Object value = entry.getValue();
+                if (value != null) {
+                    switch (comparisonPostFix) {
+                    case "Not": {
+                        predicates.add(createNotPredicate(cb, path, attributeName, value));
+                        break;
+                    }
+                    case "Gte": {
+                        predicates.add(createGtePredicate(cb, path, attributeName, value));
+                        break;
+                    }
+                    case "Lte": {
+                        predicates.add(createLtePredicate(cb, path, attributeName, value));
+                        break;
+                    }
+                    case "Lt": {
+                        predicates.add(createLtPredicate(cb, path, attributeName, value));
+                        break;
+                    }
+                    case "Gt": {
+                        predicates.add(createGtPredicate(cb, path, attributeName, value));
+                        break;
+                    }
+                    }
                 }
-            }
-        } else if (join != null) {
-            if (isAttributeEnum(attribute)) {
-                return builder.equal(join.get(attribute.getName()),
-                        Enum.valueOf(Class.class.cast(attribute.getJavaType()), (String) val));
-            } else if (isPrimitive(attribute)) {
-                return builder.equal(join.get(attribute.getName()), val);
-            } else if (attribute.isAssociation()) {
-                return builder.equal(join.get(attribute.getName()), val);
-            } else if (attribute.isCollection()) {
-                return builder.equal(join, val);
+
             }
         }
-        throw new IllegalArgumentException("equality/inequality is currently supported on primitives and enums");
+        return predicates;
     }
 
-    /**
-     * Create Like predicate
-     * 
-     * @param builder
-     * @param root
-     * @param join
-     * @param attribute
-     * @param val
-     * @return
-     */
-    private Predicate createLikePredicate(CriteriaBuilder builder, Root root, Join join, Attribute attribute,
-            String val) {
-        // like over join or root
-        if (join == null) {
-            return builder.like(root.get(attribute.getName()), val);
+    private boolean isEnum(Attribute attribute) {
+        String parentJavaClass = "";
+        if (attribute.getJavaType().getSuperclass() != null) {
+            parentJavaClass = attribute.getJavaType().getSuperclass().getSimpleName().toLowerCase();
+        }
+        return parentJavaClass.equals("enum");
+    }
+
+    private boolean isNullValue(Path path, CriteriaQuery query, String attributeName, Object val) {
+        Root root = getRoot(path, query);
+        Attribute attribute = convertStringToAttribute(root, attributeName);
+        if (isPrimitiveAttribute(attribute)) {
+            String attributeJavaClass = attribute.getJavaType().getSimpleName().toLowerCase();
+            if (attributeJavaClass.equals("string")) {
+                String valObj = val.toString();
+                return StringUtils.isBlank(valObj) || valObj.equalsIgnoreCase("null");
+            } else {
+                return val == null;
+            }
         } else {
-            return builder.like(join.get(attribute.getName()), val);
+            return val == null;
         }
     }
 
-    /**
-     * Create Gte predicate
-     * 
-     * @param builder
-     * @param root
-     * @param attribute
-     * @param val
-     * @return
-     */
-    private Predicate createGtPredicate(CriteriaBuilder builder, Root root, Attribute attribute, Object val) {
-        if (val instanceof String) {
-            // get timestamp
-            Timestamp timestamp = convertTimestamp((String) val);
-            if (timestamp != null) {
-                return builder.greaterThan(builder.lower(root.get(attribute.getName())), timestamp);
-            }
-            return builder.greaterThan(builder.lower(root.get(attribute.getName())), ((String) val).toLowerCase());
-        } else if (val instanceof Integer) {
-            return builder.greaterThan(root.get(attribute.getName()), (Integer) val);
-        }
-        throw new IllegalArgumentException("val type not supported yet");
+    private boolean isDirtyKey(String key) {
+        return !key.equals(cleanUpKey(key));
     }
 
-    /**
-     * Create Gt predicate
-     * 
-     * @param builder
-     * @param root
-     * @param a
-     * @param val
-     * @return
-     */
-    private Predicate createGtePredicate(CriteriaBuilder builder, Root root, Attribute a, Object val) {
-        if (val instanceof String) {
-            // get timestamp
-            Timestamp timestamp = convertTimestamp((String) val);
-            if (timestamp != null) {
-                return builder.greaterThanOrEqualTo(builder.lower(root.get(a.getName())), timestamp);
-            }
-            return builder.greaterThanOrEqualTo(builder.lower(root.get(a.getName())), ((String) val).toLowerCase());
-        } else if (val instanceof Integer) {
-            return builder.greaterThanOrEqualTo(root.get(a.getName()), (Integer) val);
-        }
-        throw new IllegalArgumentException("val type not supported yet");
-    }
-
-    /**
-     * Create Lt predicate
-     * 
-     * @param builder
-     * @param root
-     * @param attribute
-     * @param val
-     * @return
-     */
-    private Predicate createLtPredicate(CriteriaBuilder builder, Root root, Attribute attribute, Object val) {
-        if (val instanceof String) {
-            // get timestamp
-            Timestamp timestamp = convertTimestamp((String) val);
-            if (timestamp != null) {
-                return builder.lessThan(builder.lower(root.get(attribute.getName())), timestamp);
-            }
-            return builder.lessThan(builder.lower(root.get(attribute.getName())), ((String) val).toLowerCase());
-        } else if (val instanceof Integer) {
-            return builder.lessThan(root.get(attribute.getName()), (Integer) val);
-        }
-        throw new IllegalArgumentException("val type not supported yet");
-    }
-
-    /**
-     * Create Lte predicate
-     * 
-     * @param builder
-     * @param root
-     * @param attribute
-     * @param val
-     * @return
-     */
-    private Predicate createLtePredicate(CriteriaBuilder builder, Root root, Attribute attribute, Object val) {
-        if (val instanceof String) {
-            // get timestamp
-            Timestamp timestamp = convertTimestamp((String) val);
-            if (timestamp != null) {
-                return builder.lessThanOrEqualTo(builder.lower(root.get(attribute.getName())), timestamp);
-            }
-            return builder.lessThanOrEqualTo(builder.lower(root.get(attribute.getName())),
-                    ((String) val).toLowerCase());
-        } else if (val instanceof Integer) {
-            return builder.lessThanOrEqualTo(root.get(attribute.getName()), (Integer) val);
-        }
-        throw new IllegalArgumentException("val type not supported yet");
-    }
-
-    /**
-     * Search in all attributes
-     * 
-     * @param builder
-     * @param root
-     * @param text
-     * @param includeOnlyFields
-     * @return
-     */
-    private Predicate createSearchInAllAttributesPredicate(CriteriaBuilder builder, Root root, String text,
-            List<String> includeOnlyFields) {
-
-        // add like search
-        if (!text.contains("%")) {
-            text = "%" + text + "%";
-        }
-
-        // build the text search
-        final String finalText = text;
-        Set<Attribute> attributes = root.getModel().getAttributes();
-        List<Predicate> predicates = new ArrayList<>();
-        for (Attribute attribute : attributes) {
-            boolean javaTypeIsString = attribute.getJavaType().getSimpleName().equalsIgnoreCase("string");
-            boolean shouldSearch = includeOnlyFields.isEmpty() || includeOnlyFields.contains(attribute.getName());
-            if (javaTypeIsString && shouldSearch) {
-                Predicate predicate = builder.like(root.get(attribute.getName()), finalText);
-                predicates.add(predicate);
-            }
-        }
-
-        // return or on all predicates
-        return builder.or(predicates.toArray(new Predicate[predicates.size()]));
-
-    }
-
-    /**
-     * Get timestamp from string
-     * 
-     * @param s
-     * @return
-     */
-    private static Timestamp convertTimestamp(String s) {
-        // get the format
-        DateFormat dateFormat;
-        if (s.contains("T")) {
-            dateFormat = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss");
-        } else {
-            dateFormat = new SimpleDateFormat("yyyy-MM-dd");
-        }
-
-        // part the date
-        Date date;
-        try {
-            date = dateFormat.parse(s);
-        } catch (ParseException e) {
-            return null;
-        }
-
-        // return timestamp
-        return new Timestamp(date.getTime());
-    }
-
-    /**
-     * Retrieve primary key column definition of a generic entity in JPA
-     * 
-     * @param e
-     * @param c
-     * @return
-     */
-    private Attribute getIdAttribute(EntityManager e, Class<T> c) {
-        Metamodel m = e.getMetamodel();
-        IdentifiableType<T> of = (IdentifiableType<T>) m.managedType(c);
-        return of.getId(of.getIdType().getJavaType());
-    }
-
-    /**
-     * Clean up a key
-     * 
-     * @param key
-     * @return
-     */
     private String cleanUpKey(String key) {
+
         List<String> postfixes = Arrays.asList("Gte", "Gt", "Lte", "Lt", "Not", "And");
         for (String postfix : postfixes) {
             if (key.endsWith(postfix)) {
@@ -512,169 +346,215 @@ public class CustomSpecifications<T> {
         return key;
     }
 
-    /**
-     * Prepare join if attribut is Association
-     * 
-     * @param builder
-     * @param root
-     * @param attribute
-     * @param val
-     * @return
-     */
-    private Predicate prepareJoinAssociatedPredicate(CriteriaBuilder builder, Root root, Attribute attribute,
-            Object val) {
-        // add a join to path
-        Path rootJoinGetName = addJoinIfNotExists(root, attribute, false, false);
-        // get referenced calls
-        Class referencedClass = rootJoinGetName.getJavaType();
-        // get primary key
-        String referencedPrimaryKey = getIdAttribute(entityManager, referencedClass).getName();
-        // return join equal
-        return builder.equal(rootJoinGetName.get(referencedPrimaryKey), val);
-    }
-
-    /**
-     * Add a join
-     * 
-     * @param root
-     * @param attribute
-     * @param isConjunction
-     * @param isValueCollection
-     * @return
-     */
-    private Join addJoinIfNotExists(Root root, Attribute attribute, boolean isConjunction, boolean isValueCollection) {
-        // simple join
-        if (isConjunction && isValueCollection) {
-            return root.join(attribute.getName());
-        }
-        // get all joins
-        Join ret = null;
-        Set<Join> joins = root.getJoins();
-        for (Join join : joins) {
-            // set a join
-            if (attribute.getName().equals(join.getAttribute().getName())) {
-                ret = join;
-                break;
+    private Predicate createLtPredicate(CriteriaBuilder builder, Path path, String attributeName, Object val) {
+        String cleanKey = cleanUpKey(attributeName);
+        if (val instanceof String) {
+            Timestamp timestamp = timeStamp((String) val);
+            if (timestamp != null) {
+                return builder.lessThan(builder.lower(path.get(cleanKey)), timestamp);
             }
+            return builder.lessThan(builder.lower(path.get(cleanKey)), ((String) val).toLowerCase());
+        } else if (val instanceof Integer) {
+            return builder.lessThan(path.get(cleanKey), (Integer) val);
         }
-        if (ret == null) {
-            ret = root.join(attribute.getName());
-        }
-        return ret;
+        throw new IllegalArgumentException("val type not supported yet");
     }
 
-    /**
-     * Get the JavaType of an attribute
-     * 
-     * @param root
-     * @param attributeName
-     * @return
-     */
-    private Class getJavaTypeOfClassContainingAttribute(Root root, String attributeName) {
-        Attribute attribute = root.getModel().getAttribute(attributeName);
-        if (attribute.isAssociation()) {
-            return addJoinIfNotExists(root, attribute, false, false).getJavaType();
-        }
-        return null;
-    }
-
-    /**
-     * Convert a map that contains primary id
-     * 
-     * @param val
-     * @param a
-     * @param root
-     * @return
-     */
-    private Object convertMapContainingPrimaryIdToValue(Object val, Attribute a, Root root) {
-        Class javaTypeOfAttribute = getJavaTypeOfClassContainingAttribute(root, a.getName());
-        String primaryKeyName = getIdAttribute(entityManager, javaTypeOfAttribute).getName();
-        if (val instanceof Map && ((Map) val).keySet().size() == 1) {
-            Map map = ((Map) val);
-            for (Object key : map.keySet()) {
-                if (key.equals(primaryKeyName)) {
-                    return map.get(primaryKeyName);
-                }
+    private Predicate createLtePredicate(CriteriaBuilder builder, Path path, String attributeName, Object val) {
+        String cleanKey = cleanUpKey(attributeName);
+        if (val instanceof String) {
+            Timestamp timestamp = timeStamp((String) val);
+            if (timestamp != null) {
+                return builder.lessThanOrEqualTo(builder.lower(path.get(cleanKey)), timestamp);
             }
+            return builder.lessThanOrEqualTo(builder.lower(path.get(cleanKey)), ((String) val).toLowerCase());
+        } else if (val instanceof Integer) {
+            return builder.lessThanOrEqualTo(path.get(cleanKey), (Integer) val);
         }
-        return val;
+        throw new IllegalArgumentException("val type not supported yet");
     }
 
-    /**
-     * Check if the primary key is of type UUID
-     * 
-     * @param a
-     * @param root
-     * @return
-     */
-    private boolean isPrimaryKeyUUID(Attribute a, Root root) {
-        Class javaTypeOfAttribute = getJavaTypeOfClassContainingAttribute(root, a.getName());
-        String primaryKeyName = getIdAttribute(entityManager, javaTypeOfAttribute).getJavaType().getSimpleName()
-                .toLowerCase();
-        return primaryKeyName.equalsIgnoreCase("uuid");
-    }
-
-    /**
-     * Check if an attribute is a primitive variable
-     * 
-     * @param attribute
-     * @return
-     */
-    private boolean isPrimitive(Attribute attribute) {
-        String attributeClassName = attribute.getJavaType().getSimpleName().toLowerCase();
-        return attributeClassName.startsWith("int") || attributeClassName.startsWith("long")
-                || attributeClassName.equals("boolean") || attributeClassName.equals("string")
-                || attributeClassName.equals("float") || attributeClassName.equals("double");
-    }
-
-    /**
-     * Check if an attribute is a UUID
-     * 
-     * @param attribute
-     * @return
-     */
-    private boolean isAttributeUUID(Attribute attribute) {
-        String attributeClassName = attribute.getJavaType().getSimpleName().toLowerCase();
-        return attributeClassName.equalsIgnoreCase("uuid");
-    }
-
-    /**
-     * Check if an attribute is an enum
-     * 
-     * @param attribute
-     * @return
-     */
-    private boolean isAttributeEnum(Attribute attribute) {
-        boolean ret = false;
-        if (attribute.getJavaType().getSuperclass() != null) {
-            String attributeClassName = attribute.getJavaType().getSimpleName().toLowerCase();
-            ret = attributeClassName.equals("enum");
-        }
-        return ret;
-    }
-
-    /**
-     * Check if an attribute is null
-     * 
-     * @param attribute
-     * @param val
-     * @return
-     */
-    private boolean isAttributeNull(Attribute attribute, Object val) {
-        if (isPrimitive(attribute)) {
-            String attributeClassName = attribute.getJavaType().getSimpleName().toLowerCase();
-            if (attributeClassName.equals("string")) {
-                if (val == null)
-                    return true;
-                else {
-                    return StringUtils.isBlank(val.toString()) || val.toString().equalsIgnoreCase("null");
-                }
-            } else {
-                return val == null;
+    private Predicate createGtPredicate(CriteriaBuilder builder, Path path, String attributeName, Object val) {
+        String cleanKey = cleanUpKey(attributeName);
+        if (val instanceof String) {
+            Timestamp timestamp = timeStamp((String) val);
+            if (timestamp != null) {
+                return builder.greaterThan(builder.lower(path.get(cleanKey)), timestamp);
             }
+
+            return builder.greaterThan(builder.lower(path.get(cleanKey)), ((String) val).toLowerCase());
+        } else if (val instanceof Integer) {
+            return builder.greaterThan(path.get(cleanKey), (Integer) val);
+        }
+        throw new IllegalArgumentException("val type not supported yet");
+    }
+
+    private Predicate createGtePredicate(CriteriaBuilder builder, Path path, String attributeName, Object val) {
+        String cleanKey = cleanUpKey(attributeName);
+        if (val instanceof String) {
+            Timestamp timestamp = timeStamp((String) val);
+            if (timestamp != null) {
+                return builder.greaterThanOrEqualTo(builder.lower(path.get(cleanKey)), timestamp);
+            }
+            return builder.greaterThanOrEqualTo(builder.lower(path.get(cleanKey)), ((String) val).toLowerCase());
+        } else if (val instanceof Integer) {
+            return builder.greaterThanOrEqualTo(path.get(cleanKey), (Integer) val);
+        }
+        throw new IllegalArgumentException("val type not supported yet");
+    }
+
+    private Predicate createNotPredicate(CriteriaBuilder builder, Path path, String attributeName, Object val) {
+        String cleanKey = cleanUpKey(attributeName);
+        if (val instanceof String) {
+            return builder.notEqual(builder.lower(path.get(cleanKey)), ((String) val));
+        } else if (val instanceof Integer) {
+            return builder.notEqual(builder.lower(path.get(cleanKey)), (Integer) val);
+        }
+        throw new IllegalArgumentException("val type not supported yet");
+    }
+
+    private static Timestamp timeStamp(String dateStr) {
+        DateFormat dateFormat;
+        if (dateStr.contains("T")) {
+            dateFormat = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss");
         } else {
-            return val == null;
+            dateFormat = new SimpleDateFormat("yyyy-MM-dd");
         }
-
+        Date date;
+        try {
+            date = dateFormat.parse(dateStr);
+        } catch (ParseException e) {
+            return null;
+        }
+        long time = date.getTime();
+        return new Timestamp(time);
     }
+
+    public Map<String, Attribute> convertStringMapToAttrMap(Path path, CriteriaQuery query,
+            Map<String, Object> filterMap) {
+        Root root = getRoot(path, query);
+        Map<String, Attribute> attributeMap = new HashMap<>();
+        for (Map.Entry<String, Object> entry : filterMap.entrySet()) {
+            if (isDirtyKey(entry.getKey())) {
+                continue;
+            }
+            Attribute attribute = root.getModel().getAttribute(entry.getKey());
+            attributeMap.put(entry.getKey(), attribute);
+        }
+        return attributeMap;
+    }
+
+    public static Attribute convertStringToAttribute(Root root, String name) {
+        return root.getModel().getAttribute(name);
+    }
+
+    private String getPrimaryKey(Join join) {
+        String primaryKey = getPrimaryKey(em, join.getJavaType()).getName();
+        return primaryKey;
+    }
+
+    private Attribute getPrimaryKey(EntityManager em, Class<T> clazz) {
+        Metamodel m = em.getMetamodel();
+        IdentifiableType<T> of = (IdentifiableType<T>) m.managedType(clazz);
+        return of.getId(of.getIdType().getJavaType());
+    }
+
+    private static Map<String, Attribute> filterSingularAttrs(Map<String, Attribute> map) {
+        Map<String, Attribute> singularAttrMap = new HashMap<>();
+        for (Map.Entry<String, Attribute> entry : map.entrySet()) {
+            Attribute attribute = entry.getValue();
+            if (attribute instanceof SingularAttribute) {
+                singularAttrMap.put(entry.getKey(), entry.getValue());
+            }
+        }
+        return singularAttrMap;
+    }
+
+    private static Map<String, Attribute> filterCollectionAttrs(Map<String, Attribute> map) {
+        Map<String, Attribute> singularAttrMap = new HashMap<>();
+        for (Map.Entry<String, Attribute> entry : map.entrySet()) {
+            Attribute attribute = entry.getValue();
+            if (attribute instanceof ListAttribute || attribute instanceof CollectionAttribute
+                    || attribute instanceof SetAttribute) {
+                singularAttrMap.put(entry.getKey(), entry.getValue());
+            }
+        }
+        return singularAttrMap;
+    }
+
+    private static Map<String, Object> filterPrimitiveValues(Map<String, Object> map) {
+        Map<String, Object> primitiveMap = new HashMap<>();
+        for (Map.Entry<String, Object> entry : map.entrySet()) {
+            if (isPrimitiveValue(entry.getValue()) || entry.getValue() == null
+                    || entry.getValue().toString().toLowerCase().trim() == "null"
+                    || entry.getValue().toString().toLowerCase().trim() == "") {
+                primitiveMap.put(entry.getKey(), entry.getValue());
+            }
+        }
+        return primitiveMap;
+    }
+
+    private static Map<String, Object> filterAttributesWithCollectionValues(Map<String, Object> map) {
+        Map<String, Object> collectionValuesMap = new HashMap<>();
+        for (Map.Entry<String, Object> entry : map.entrySet()) {
+            if (entry.getValue() instanceof Collection) {
+                collectionValuesMap.put(entry.getKey(), entry.getValue());
+            }
+        }
+        return collectionValuesMap;
+    }
+
+    private static Map<String, Attribute> filterAssociationAttributes(Map<String, Attribute> map) {
+        Map<String, Attribute> associationsMap = new HashMap<>();
+        for (Map.Entry<String, Attribute> entry : map.entrySet()) {
+            Attribute attribute = entry.getValue();
+            if (attribute.isAssociation()) {
+                associationsMap.put(entry.getKey(), entry.getValue());
+            }
+        }
+        return associationsMap;
+    }
+
+    private static boolean isCollectionOfPrimitives(Object value) {
+        if (value instanceof Collection) {
+            Collection collection = (Collection) value;
+            Object object = collection.iterator().next();
+            if (isPrimitiveValue(object)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isCollectionOfMaps(Object value) {
+        if (value instanceof Collection) {
+            Collection collection = (Collection) value;
+            Object object = collection.iterator().next();
+            if (object instanceof Map) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isMap(Object value) {
+        return value != null && value instanceof Map;
+    }
+
+    private boolean isPrimitiveAttribute(Attribute attribute) {
+        String attributeJavaClass = attribute.getJavaType().getSimpleName().toLowerCase();
+        return attributeJavaClass.startsWith("int") || attributeJavaClass.startsWith("long")
+                || attributeJavaClass.equals("boolean") || attributeJavaClass.equals("string")
+                || attributeJavaClass.equals("float") || attributeJavaClass.equals("double");
+    }
+
+    private static boolean isPrimitiveValue(Object obj) {
+        if (obj == null) {
+            return false;
+        }
+        String javaClass = obj.getClass().getSimpleName().toLowerCase();
+        return javaClass.startsWith("int") || javaClass.startsWith("long") || javaClass.equals("boolean")
+                || javaClass.equals("string") || javaClass.equals("float") || javaClass.equals("double");
+    }
+
 }
