@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2021 Davide Gironi
+ *
+ * Please refer to LICENSE file for licensing information
+ */
+ 
 import React from "react";
 import { Admin, Resource } from "react-admin";
 
