@@ -28,7 +28,9 @@ const self = {
         subsamplesId: row.subsamples.subsamplesId,
       }),
       unsetfields: (row) => {
-        row.subsamples = { subsamplesId: row.subsamplesId };
+        if(row.subsamplesId != null) {
+          row.subsamples = { subsamplesId: row.subsamplesId };
+        }
         delete row.id;
         return row;
       },
